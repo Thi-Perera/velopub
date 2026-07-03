@@ -1,0 +1,41 @@
+name: Pubblica su Instagram
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "post o story"
+        required: true
+        default: "post"
+        type: choice
+        options:
+          - post
+          - story
+      image_url:
+        description: "URL pubblico HTTPS dell'immagine"
+        required: true
+      caption:
+        description: "Caption (solo per i post)"
+        required: false
+  # Esempio: pubblicazione automatica programmata (opzionale)
+  # schedule:
+  #   - cron: '0 9 * * *'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Pubblica su Instagram
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
+        run: |
+          node publish.js "${{ inputs.mode }}" "${{ inputs.image_url }}" "${{ inputs.caption }}"
