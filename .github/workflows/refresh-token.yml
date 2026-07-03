@@ -1,0 +1,28 @@
+name: Rinnova Token Instagram
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Ogni 50 giorni (il token dura 60): meglio rinnovare con margine
+    - cron: '0 6 */50 * *'
+
+jobs:
+  refresh-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rinnova long-lived token e aggiorna il secret
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: |
+          RESPONSE=$(curl -s "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${IG_ACCESS_TOKEN}")
+
+          NEW_TOKEN=$(echo "$RESPONSE" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).access_token")
+
+          if [ -z "$NEW_TOKEN" ] || [ "$NEW_TOKEN" = "undefined" ]; then
+            echo "Errore: rinnovo fallito. Risposta: $RESPONSE"
+            exit 1
+          fi
+
+          echo "Token rinnovato con successo."
+          gh secret set IG_ACCESS_TOKEN --body "$NEW_TOKEN"
