@@ -1,0 +1,28 @@
+name: Importa foto da Telegram
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Ogni 15 minuti
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Importa foto nuove da Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node import-from-telegram.js
