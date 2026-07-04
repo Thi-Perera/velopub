@@ -1,22 +1,24 @@
 /**
- * publish-queue.js
- * Prende un'immagine CASUALE dalla cartella queue/, la pubblica su Instagram
- * (senza caption), poi la rinomina con data + numero progressivo del giorno
- * e la sposta in published/. Se la coda è vuota, ripesca a caso da published/
- * (riciclo) senza spostarla di nuovo.
+ * publish.js
+ * Prende un'immagine CASUALE da queue/, la pubblica su Instagram
+ * (post o storia), la rinomina con data + progressivo del giorno e la
+ * sposta in published/. Se la coda è vuota ricicla da published/
+ * (evitando di ripetere l'ultima pubblicata). Al termine manda una
+ * notifica Telegram con la foto pubblicata e lo stato della coda.
  *
- * Uso: node publish-queue.js post
- *      node publish-queue.js story
+ * Uso: node publish.js story   (default)
+ *      node publish.js post
  *
  * Variabili d'ambiente richieste:
- *   IG_ACCESS_TOKEN
- *   IG_ACCOUNT_ID
- *   GITHUB_REPOSITORY   (fornita automaticamente da GitHub Actions)
+ *   IG_ACCESS_TOKEN, IG_ACCOUNT_ID
+ *   GITHUB_REPOSITORY (fornita da GitHub Actions)
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (opzionali, per le notifiche)
  */
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { sendMessage, sendPhotoFile } = require('./telegram');
 
 const GRAPH_API_VERSION = 'v21.0';
 const BASE_URL = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
@@ -27,6 +29,7 @@ const REPO = process.env.GITHUB_REPOSITORY;
 
 const QUEUE_DIR = 'queue';
 const PUBLISHED_DIR = 'published';
+const LAST_FILE = '.last-published';
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
 
 if (!ACCESS_TOKEN || !ACCOUNT_ID) {
@@ -47,20 +50,21 @@ function pickRandom(arr) {
 
 function todayString() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function nextDailyIndex(date) {
-  const existing = listImages(PUBLISHED_DIR).filter((f) => f.startsWith(`${date}-`));
-  return existing.length + 1;
+  return listImages(PUBLISHED_DIR).filter((f) => f.startsWith(`${date}-`)).length + 1;
+}
+
+function getLastPublished() {
+  return fs.existsSync(LAST_FILE) ? fs.readFileSync(LAST_FILE, 'utf8').trim() : '';
 }
 
 /**
  * Sceglie l'immagine da pubblicare.
- * Ritorna { fileName, dir, isFromQueue }
+ * Coda per prima; se vuota ricicla da published/ evitando, se possibile,
+ * l'ultima immagine già mandata (niente doppioni consecutivi).
  */
 function selectImage() {
   const queueImages = listImages(QUEUE_DIR);
@@ -69,11 +73,14 @@ function selectImage() {
   }
 
   console.log('Coda vuota: ripesco a caso dalle immagini già pubblicate.');
-  const publishedImages = listImages(PUBLISHED_DIR);
-  if (publishedImages.length > 0) {
-    return { fileName: pickRandom(publishedImages), dir: PUBLISHED_DIR, isFromQueue: false };
+  let candidates = listImages(PUBLISHED_DIR);
+  const last = getLastPublished();
+  if (candidates.length > 1 && last) {
+    candidates = candidates.filter((f) => f !== last);
   }
-
+  if (candidates.length > 0) {
+    return { fileName: pickRandom(candidates), dir: PUBLISHED_DIR, isFromQueue: false };
+  }
   return null;
 }
 
@@ -119,41 +126,43 @@ async function publishContainer(containerId) {
   return data.id;
 }
 
+/** Sposta il file da queue/ a published/ col nome data-progressivo. Ritorna il nuovo nome. */
 function archiveFromQueue(fileName) {
   if (!fs.existsSync(PUBLISHED_DIR)) fs.mkdirSync(PUBLISHED_DIR, { recursive: true });
 
   const date = todayString();
-  const index = nextDailyIndex(date);
-  const ext = path.extname(fileName);
-  const newName = `${date}-${index}${ext}`;
-
+  const newName = `${date}-${nextDailyIndex(date)}${path.extname(fileName)}`;
   fs.renameSync(path.join(QUEUE_DIR, fileName), path.join(PUBLISHED_DIR, newName));
   console.log(`Rinominata e archiviata come: ${newName}`);
+  return newName;
 }
 
 function commitAndPush() {
   execSync('git config user.name "ig-publisher-bot"');
   execSync('git config user.email "actions@github.com"');
-  execSync('git add queue published');
+  execSync(`git add ${QUEUE_DIR} ${PUBLISHED_DIR} ${LAST_FILE}`);
   execSync('git commit -m "Pubblicazione automatica" || echo "Nulla da committare"');
+  execSync('git pull --rebase');
   execSync('git push');
 }
 
 async function main() {
-  const mode = process.argv[2] || 'post';
+  const mode = process.argv[2] || 'story';
   if (!['post', 'story'].includes(mode)) {
-    console.error('Uso: node publish-queue.js post|story');
+    console.error('Uso: node publish.js post|story');
     process.exit(1);
   }
 
   const selection = selectImage();
   if (!selection) {
     console.log('Nessuna immagine disponibile né in queue né in published. Esco.');
+    await sendMessage('⚠️ Nessuna immagine da pubblicare: coda e archivio vuoti. Mandami qualche foto!');
     return;
   }
 
   const { fileName, dir, isFromQueue } = selection;
   const imageUrl = buildRawUrl(dir, fileName);
+  const label = mode === 'story' ? 'Storia' : 'Post';
 
   console.log(`Pubblico "${fileName}" come ${mode} da URL: ${imageUrl}`);
 
@@ -164,17 +173,27 @@ async function main() {
   await waitUntilContainerReady(containerId);
   await publishContainer(containerId);
 
+  let finalName = fileName;
+  let finalPath = path.join(dir, fileName);
   if (isFromQueue) {
-    archiveFromQueue(fileName);
-    commitAndPush();
-  } else {
-    console.log('Immagine riciclata da published/, nessuno spostamento necessario.');
+    finalName = archiveFromQueue(fileName);
+    finalPath = path.join(PUBLISHED_DIR, finalName);
   }
+  fs.writeFileSync(LAST_FILE, finalName);
+  commitAndPush();
+
+  const remaining = listImages(QUEUE_DIR).length;
+  const source = isFromQueue ? '🆕 dalla coda' : '♻️ riciclata dall\'archivio';
+  await sendPhotoFile(
+    finalPath,
+    `✅ ${label} pubblicata!\n📁 ${finalName}${isFromQueue && finalName !== fileName ? ` (era ${fileName})` : ''}\n${source}\n🗂 In coda: ${remaining}${remaining === 0 ? ' — mandami nuove foto!' : ''}`
+  );
 
   console.log('Fatto.');
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('Fallito:', err.message);
+  await sendMessage(`❌ Pubblicazione fallita: ${err.message.slice(0, 400)}`);
   process.exit(1);
 });

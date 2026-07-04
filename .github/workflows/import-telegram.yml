@@ -3,11 +3,15 @@ name: Importa foto da Telegram
 on:
   workflow_dispatch:
   schedule:
-    # Ogni 15 minuti
-    - cron: '*/15 * * * *'
+    # Ogni ora al minuto 17 (sfalsato per non scontrarsi con la pubblicazione)
+    - cron: '17 * * * *'
 
 permissions:
   contents: write
+
+concurrency:
+  group: repo-writes
+  cancel-in-progress: false
 
 jobs:
   import:

@@ -3,8 +3,8 @@ name: Rinnova Token Instagram
 on:
   workflow_dispatch:
   schedule:
-    # Ogni 50 giorni (il token dura 60): meglio rinnovare con margine
-    - cron: '0 6 */50 * *'
+    # Il giorno 1 di ogni mese alle 6 UTC (il token dura 60 giorni: ampio margine)
+    - cron: '0 6 1 * *'
 
 jobs:
   refresh-token:
@@ -12,17 +12,37 @@ jobs:
     steps:
       - name: Rinnova long-lived token e aggiorna il secret
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # NOTA: il GITHUB_TOKEN standard NON può scrivere i secrets.
+          # Serve un PAT (fine-grained, permesso "Secrets: read/write" su questa repo)
+          # salvato come secret GH_PAT.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPO: ${{ github.repository }}
         run: |
-          RESPONSE=$(curl -s "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${IG_ACCESS_TOKEN}")
+          notify() {
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode text="$1" > /dev/null
+            fi
+          }
 
-          NEW_TOKEN=$(echo "$RESPONSE" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).access_token")
+          if [ -z "$GH_TOKEN" ]; then
+            notify "❌ Rinnovo token IG: manca il secret GH_PAT (serve un PAT con permesso Secrets read/write). Il token IG scadrà se non lo configuri!"
+            echo "Errore: secret GH_PAT mancante."
+            exit 1
+          fi
+
+          RESPONSE=$(curl -s "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${IG_ACCESS_TOKEN}")
+          NEW_TOKEN=$(echo "$RESPONSE" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).access_token" 2>/dev/null || true)
 
           if [ -z "$NEW_TOKEN" ] || [ "$NEW_TOKEN" = "undefined" ]; then
+            notify "❌ Rinnovo token IG FALLITO. Controlla il workflow su GitHub (il token potrebbe essere già scaduto)."
             echo "Errore: rinnovo fallito. Risposta: $RESPONSE"
             exit 1
           fi
 
+          gh secret set IG_ACCESS_TOKEN --repo "$REPO" --body "$NEW_TOKEN"
+          notify "🔑 Token Instagram rinnovato: valido altri 60 giorni."
           echo "Token rinnovato con successo."
-          gh secret set IG_ACCESS_TOKEN --body "$NEW_TOKEN"
