@@ -89,6 +89,45 @@ function buildRawUrl(dir, fileName) {
   return `https://raw.githubusercontent.com/${REPO}/${branch}/${dir}/${encodeURIComponent(fileName)}`;
 }
 
+/**
+ * STORIE: Instagram stira le immagini non-9:16 per riempire lo schermo
+ * (le "comprime"). Meglio TAGLIARE: cover-crop centrale a 1080x1920, così
+ * IG riceve un 9:16 esatto e non tocca nulla. Il ritaglio va committato
+ * (l'API legge da URL raw) con nome UNIVOCO: i raw URL sono cachati dal
+ * CDN ~5 min, riusare lo stesso nome servirebbe l'immagine vecchia.
+ * Se ImageMagick manca o l'immagine è già ~9:16 si pubblica l'originale.
+ */
+const TMP_DIR = 'tmp';
+function makeStoryCrop(srcPath) {
+  try {
+    const dims = execSync(`identify -format "%w %h" "${srcPath}"`).toString().trim().split(' ').map(Number);
+    const [w, h] = dims;
+    if (!w || !h) return null;
+    if (Math.abs(w / h - 9 / 16) < 0.02) {
+      console.log(`Già in 9:16 (${w}x${h}): nessun ritaglio.`);
+      return null;
+    }
+    fs.mkdirSync(TMP_DIR, { recursive: true });
+    const out = path.join(TMP_DIR, `story-${Date.now()}.jpg`);
+    execSync(`convert "${srcPath}" -auto-orient -resize 1080x1920^ -gravity center -extent 1080x1920 -quality 92 "${out}"`);
+    console.log(`Storia: ritaglio centrale 9:16 (${w}x${h} → 1080x1920, niente schiacciamento).`);
+    return out;
+  } catch (err) {
+    console.log(`Ritaglio non riuscito (${err.message.split('\n')[0]}): pubblico l'originale.`);
+    return null;
+  }
+}
+
+/** Committa e pusha un singolo file (il ritaglio deve stare online PRIMA del publish). */
+function pushSingleFile(p, msg) {
+  execSync('git config user.name "ig-publisher-bot"');
+  execSync('git config user.email "actions@github.com"');
+  execSync(`git add "${p}"`);
+  execSync(`git commit -m "${msg}"`);
+  execSync('git pull --rebase');
+  execSync('git push');
+}
+
 async function createMediaContainer({ imageUrl, mediaType }) {
   const params = new URLSearchParams({ image_url: imageUrl, access_token: ACCESS_TOKEN });
   if (mediaType === 'STORIES') params.set('media_type', 'STORIES');
@@ -140,7 +179,7 @@ function archiveFromQueue(fileName) {
 function commitAndPush() {
   execSync('git config user.name "ig-publisher-bot"');
   execSync('git config user.email "actions@github.com"');
-  execSync(`git add ${QUEUE_DIR} ${PUBLISHED_DIR} ${LAST_FILE}`);
+  execSync('git add -A'); // include anche la rimozione del ritaglio temporaneo
   execSync('git commit -m "Pubblicazione automatica" || echo "Nulla da committare"');
   execSync('git pull --rebase');
   execSync('git push');
@@ -161,8 +200,18 @@ async function main() {
   }
 
   const { fileName, dir, isFromQueue } = selection;
-  const imageUrl = buildRawUrl(dir, fileName);
+  let imageUrl = buildRawUrl(dir, fileName);
   const label = mode === 'story' ? 'Storia' : 'Post';
+
+  // Storie: mai lasciar stirare l'immagine a IG — cover-crop 9:16 nostro
+  let cropPath = null;
+  if (mode === 'story') {
+    cropPath = makeStoryCrop(path.join(dir, fileName));
+    if (cropPath) {
+      pushSingleFile(cropPath, 'Ritaglio 9:16 per storia (temporaneo)');
+      imageUrl = buildRawUrl(TMP_DIR, path.basename(cropPath));
+    }
+  }
 
   console.log(`Pubblico "${fileName}" come ${mode} da URL: ${imageUrl}`);
 
@@ -180,6 +229,7 @@ async function main() {
     finalPath = path.join(PUBLISHED_DIR, finalName);
   }
   fs.writeFileSync(LAST_FILE, finalName);
+  if (cropPath && fs.existsSync(cropPath)) fs.unlinkSync(cropPath); // il ritaglio è servito
   commitAndPush();
 
   const remaining = listImages(QUEUE_DIR).length;

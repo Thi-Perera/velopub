@@ -34,6 +34,11 @@ jobs:
         with:
           node-version: "20"
 
+      # ImageMagick serve per il ritaglio 9:16 delle storie (di solito è già
+      # sul runner: questo passo è un no-op da pochi secondi in quel caso)
+      - name: Assicura ImageMagick
+        run: command -v convert >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick)
+
       - name: Importa foto nuove da Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
