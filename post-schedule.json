@@ -1,0 +1,8 @@
+{
+  "_nota": "Slot di pubblicazione post (orari UTC). day: Mon Tue Wed Thu Fri Sat Sun. Modificabile a piacere: la coda si adatta ai nuovi slot dal prossimo import.",
+  "slots": [
+    { "day": "Mon", "time": "17:30" },
+    { "day": "Wed", "time": "17:30" },
+    { "day": "Sat", "time": "17:30" }
+  ]
+}

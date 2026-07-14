@@ -25,6 +25,11 @@ jobs:
         with:
           node-version: "20"
 
+      # ImageMagick serve alla normalizzazione degli zip POST (ratio uniforme,
+      # JPEG 1440px). Di solito è già sul runner: no-op da pochi secondi.
+      - name: Assicura ImageMagick
+        run: command -v convert >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick)
+
       - name: Importa foto nuove da Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
