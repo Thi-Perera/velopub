@@ -148,6 +148,10 @@ function validatePost(meta, imageCount) {
   if (imageCount < 1) errors.push('nessuna immagine jpg/png nello zip');
   if (imageCount > MAX_SLIDES) errors.push(`troppe slide: ${imageCount}/${MAX_SLIDES} (i dump più lunghi si pubblicano solo dall'app)`);
 
+  if (meta.manuale !== undefined && typeof meta.manuale !== 'boolean') {
+    errors.push('"manuale" deve essere true o false');
+  }
+
   if (meta.alt_text !== undefined) {
     if (!Array.isArray(meta.alt_text)) errors.push('"alt_text" deve essere un array di stringhe (una per slide)');
     else if (meta.alt_text.some((a) => String(a).length > MAX_ALT_TEXT)) errors.push(`alt_text oltre i ${MAX_ALT_TEXT} caratteri`);

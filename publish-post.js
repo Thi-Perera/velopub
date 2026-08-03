@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { sendMessage, sendPhotoFile } = require('./telegram');
+const { sendMessage, sendPhotoFile, sendDocumentFile, sendMediaGroup } = require('./telegram');
 const {
   POST_QUEUE_DIR,
   POST_PUBLISHED_DIR,
@@ -26,6 +26,9 @@ const {
   buildCaption,
   formatWhen,
 } = require('./post-utils');
+
+// Post consegnati a mano: escono dalla coda ma non sono pubblicati dall'API.
+const HANDOFF_DIR = 'consegnati-posts';
 
 const GRAPH_API_VERSION = 'v21.0';
 const BASE_URL = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
@@ -105,6 +108,48 @@ async function publishPost(post) {
   return pub.id;
 }
 
+/**
+ * Consegna a mano: invece di pubblicare, manda il pacchetto pronto in chat.
+ * Serve quando il post deve avere la MUSICA: l'API di Instagram non espone
+ * nessun parametro audio per i caroselli (verificato sui doc Meta) e non
+ * permette di creare bozze, quindi l'ultimo passo lo fa l'utente dall'app.
+ *
+ * Le slide partono come DOCUMENTI: sono gia' normalizzate a 1440px e una
+ * ricompressione di Telegram vanificherebbe la normalizzazione.
+ * La caption viaggia in un messaggio SEPARATO e senza altro testo attorno,
+ * cosi' un tocco lungo la copia per intero.
+ */
+async function handoffPost(post, caption) {
+  const files = post.images.map((f) => path.join(post.dir, f));
+  const intestazione =
+    `\u23F0 E' l'ora: ${post.dirName}\n` +
+    `${post.images.length} slide, in ordine. Caption nel messaggio dopo.`;
+
+  // Telegram accetta album da 2 a 10 elementi: con una slide sola serve
+  // sendDocumentFile, altrimenti l'invio fallisce e il post resta incastrato.
+  const inviato = files.length === 1
+    ? Boolean(await sendDocumentFile(files[0], intestazione))
+    : await sendMediaGroup(files, intestazione);
+  if (!inviato) throw new Error('invio a Telegram fallito');
+
+  // Messaggio separato: solo la caption, niente intestazioni da ripulire.
+  await sendMessage(caption);
+
+  fs.mkdirSync(HANDOFF_DIR, { recursive: true });
+  const meta = { ...post.meta, handoff_at: new Date().toISOString() };
+  fs.writeFileSync(path.join(post.dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  const dest = path.join(HANDOFF_DIR, post.dirName);
+  fs.renameSync(post.dir, dest);
+
+  await sendMessage(
+    `\u{1F4F2} Pacchetto consegnato: ${post.dirName}\n` +
+    `Salva le ${post.images.length} slide, aprile su Instagram nell'ordine, ` +
+    `incolla la caption qui sopra e scegli la musica.\n` +
+    `\u2139\uFE0F Non lo pubblico io: era marcato "manuale".`
+  );
+  return dest;
+}
+
 /** Sposta la cartella del post in published-posts/ e annota l'esito nel meta. */
 function archivePost(post, mediaId) {
   fs.mkdirSync(POST_PUBLISHED_DIR, { recursive: true });
@@ -115,10 +160,24 @@ function archivePost(post, mediaId) {
   return dest;
 }
 
+/**
+ * `git add -A -- <dir>` esce con "fatal: pathspec ... did not match any files"
+ * se la cartella non esiste, e l'eccezione fermerebbe commitAndPush DOPO che il
+ * post e' gia' uscito su Instagram: niente push, la coda resta invariata e alla
+ * run successiva il post viene ripubblicato. Le creo tutte prima (git ignora le
+ * cartelle vuote, quindi non sporca il repo).
+ */
+function ensureWorkDirs() {
+  for (const d of [POST_QUEUE_DIR, POST_PUBLISHED_DIR, HANDOFF_DIR]) {
+    fs.mkdirSync(d, { recursive: true });
+  }
+}
+
 function commitAndPush(msg) {
   execSync('git config user.name "ig-publisher-bot"');
   execSync('git config user.email "actions@github.com"');
-  execSync(`git add -A -- ${POST_QUEUE_DIR} ${POST_PUBLISHED_DIR}`);
+  ensureWorkDirs();
+  execSync(`git add -A -- ${POST_QUEUE_DIR} ${POST_PUBLISHED_DIR} ${HANDOFF_DIR}`);
   execSync(`git commit -m "${msg}" || echo "Nulla da committare"`);
   execSync('git pull --rebase');
   execSync('git push');
@@ -141,6 +200,22 @@ async function main() {
   for (const post of due) {
     const caption = buildCaption(post.meta);
     try {
+      if (post.meta.manuale === true) {
+        try {
+          await handoffPost(post, caption);
+          commitAndPush(`Post consegnato a mano: ${post.dirName}`);
+          console.log(`Consegnato (manuale) ${post.dirName}`);
+        } catch (errH) {
+          // Non blocca la coda: un problema di consegna e' locale a questo post,
+          // gli automatici successivi devono comunque uscire.
+          console.error(`Consegna di ${post.dirName} fallita:`, errH.message);
+          await sendMessage(
+            `\u26A0\uFE0F Post manuale "${post.dirName}" non consegnato: ${String(errH.message).slice(0, 300)}\n` +
+            `Resta in coda e riprovo alla prossima run. Per fermarlo: /annulla, ` +
+            `oppure /manuale <n> off per pubblicarlo in automatico.`);
+        }
+        continue;
+      }
       const mediaId = await publishPost(post);
       const dest = archivePost(post, mediaId);
       // Commit SUBITO dopo ogni post: se la run muore, il pubblicato è già archiviato
@@ -158,7 +233,7 @@ async function main() {
       console.log(`Pubblicato ${post.dirName} → media ${mediaId}`);
     } catch (err) {
       console.error(`Pubblicazione di ${post.dirName} fallita:`, err.message);
-      await sendMessage(`❌ Post "${post.dirName}" non pubblicato: ${err.message.slice(0, 400)}\nResta in coda, riprovo alla prossima run. /coda per lo stato.`);
+      await sendMessage(`❌ Post "${post.dirName}" ${post.meta.manuale === true ? 'non consegnato' : 'non pubblicato'}: ${err.message.slice(0, 400)}\nResta in coda, riprovo alla prossima run. /coda per lo stato.`);
       // Non si blocca la coda: si prova comunque coi successivi? NO: in ordine
       // cronologico, se fallisce il primo è quasi sempre un problema globale
       // (token, rete) — meglio fermarsi e riprovare alla prossima run.
@@ -168,8 +243,14 @@ async function main() {
   console.log('Fatto.');
 }
 
-main().catch(async (err) => {
-  console.error('Fallito:', err.message);
-  await sendMessage(`❌ Pubblicazione post fallita: ${err.message.slice(0, 400)}`);
-  process.exit(1);
-});
+// Esegue solo se lanciato direttamente: cosi' il modulo si puo' importare nei
+// test senza far partire una pubblicazione vera.
+if (require.main === module) {
+  main().catch(async (err) => {
+    console.error('Fallito:', err.message);
+    await sendMessage(`❌ Pubblicazione post fallita: ${err.message.slice(0, 400)}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { __test: { handoffPost, archivePost, ensureWorkDirs, HANDOFF_DIR } };

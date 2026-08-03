@@ -163,6 +163,7 @@ async function handlePostZip(tmpDir, zipName, metaFile) {
 
   const finalMeta = {
     caption: String(meta.caption || '').trim(),
+    manuale: meta.manuale === true,   // true = allo slot te lo consegno, non lo pubblico
     alt_text: Array.isArray(meta.alt_text) ? meta.alt_text.map((a) => String(a).slice(0, 1000)) : [],
     tags: Array.isArray(meta.tags) ? meta.tags : [],
     publish_at: slot.when.toISOString(),
@@ -182,6 +183,7 @@ async function handlePostZip(tmpDir, zipName, metaFile) {
     `📁 ${dirName}\n` +
     `🖼 ${result.count} slide, ratio ${result.ratio}\n` +
     `⏰ Esce: ${formatWhen(slot.when)}${slotNote}\n` +
+    (finalMeta.manuale ? `\u{1F4F2} MANUALE: allo slot te lo mando qui, lo pubblichi tu (musica!)\n` : '') +
     `👀 /anteprima ${slug} · 📋 /coda`
   );
   console.log(`Post in coda: ${dirName} (${result.count} slide)`);
@@ -249,7 +251,8 @@ async function handleCommand(text) {
     }
     const lines = posts.map((p, i) => {
       const cap = buildCaption(p.meta).replace(/\s+/g, ' ').slice(0, 60);
-      return `${i + 1}. ${formatWhen(p.meta.publish_at)} — ${p.images.length} slide\n   ${p.dirName}\n   "${cap}…"`;
+      const modo = p.meta.manuale === true ? ' \u{1F4F2} manuale' : '';
+      return `${i + 1}. ${formatWhen(p.meta.publish_at)} — ${p.images.length} slide${modo}\n   ${p.dirName}\n   "${cap}…"`;
     });
     await sendMessage(`📮 Post in coda (${posts.length}):\n${lines.join('\n')}\n\n👀 /anteprima N · 🔀 /sposta N <ISO|prossimo> · 🗑 /annulla N`);
     return true;
@@ -289,6 +292,20 @@ async function handleCommand(text) {
     return true;
   }
 
+  if (lower.startsWith('/manuale')) {
+    const [, ref, off] = cmd.split(/\s+/);
+    if (!ref) { await sendMessage('Uso: /manuale <numero o nome> [off]  (vedi /coda)'); return true; }
+    const { post, error } = findPost(ref, listQueuedPosts());
+    if (error) { await sendMessage(`\u26A0\uFE0F ${error}`); return true; }
+    const attiva = String(off || '').toLowerCase() !== 'off';
+    const meta = { ...post.meta, manuale: attiva };
+    fs.writeFileSync(path.join(post.dir, 'meta.json'), JSON.stringify(meta, null, 2));
+    await sendMessage(attiva
+      ? `\u{1F4F2} "${post.dirName}" passa a MANUALE.\nAllo slot (${formatWhen(post.meta.publish_at)}) ti mando slide e caption: lo pubblichi tu dall'app, con la musica.`
+      : `\u{1F916} "${post.dirName}" torna AUTOMATICO: lo pubblico io allo slot (${formatWhen(post.meta.publish_at)}).`);
+    return true;
+  }
+
   if (lower.startsWith('/annulla')) {
     const ref = cmd.split(/\s+/)[1];
     if (!ref) { await sendMessage('Uso: /annulla <numero o nome> (vedi /coda)'); return true; }
@@ -309,11 +326,12 @@ async function handleCommand(text) {
       `   -repost → BOZZA: zip mandato qui in chat con foto + testo (studio, NON storie)\n` +
       `   (testo non riconosciuto accanto al link → ti chiedo io coi bottoni)\n` +
       `📮 .zip con meta.json + immagini → POST carosello programmato\n` +
-      `   meta.json: {"caption":"…","alt_text":["…"],"tags":["…"],"publish_at":"2026-07-20T17:30:00Z"}\n` +
+      `   meta.json: {"caption":"…","alt_text":["…"],"tags":["…"],"publish_at":"2026-07-20T17:30:00Z","manuale":false}\n` +
       `   (publish_at opzionale: senza, prendo il primo slot libero lun/mer/sab 17:30 UTC)\n` +
       `   (in alternativa basta un caption.txt con il solo testo)\n` +
       `📋 /coda → post programmati\n` +
       `👀 /anteprima N · 🔀 /sposta N <data|prossimo> · 🗑 /annulla N\n` +
+      `📲 /manuale N → allo slot te lo mando invece di pubblicarlo (per la musica); /manuale N off per annullare\n` +
       `📊 /status → stato code\n` +
       `Storie ogni 4 ore; post negli slot del calendario. Conferme sempre qui.`
     );

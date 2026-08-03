@@ -148,6 +148,42 @@ principale). Da locale:
 ⚠️ La chiamata a Instagram parte dai runner GitHub (IP datacenter): usa la
 sessione di un account che puoi permetterti di dover rigenerare.
 
+## 📲 Post con la musica: modalità manuale
+
+L'API di Instagram **non permette di allegare musica** a un post carosello: il
+container accetta solo `media_type`, `children`, `caption`, `alt_text` — nessun
+parametro audio esiste. E **non permette di creare bozze**: il container non è
+visibile nell'app e scade dopo 24 ore. *(Verificato sui doc Meta il 2026-08-03;
+la controprova è che su Facebook Pages `published=false` e
+`scheduled_publish_time` sono documentati, su Instagram no.)*
+
+Quindi per i post che devono avere la musica l'ultimo passo lo fai tu, e la
+pipeline te lo prepara: **allo slot, invece di pubblicare, il bot ti consegna
+il pacchetto in chat**.
+
+Si attiva in due modi:
+
+    // nel meta.json dello zip
+    { "caption": "…", "publish_at": "…", "manuale": true }
+
+    /manuale 3          // su un post già in coda (vedi /coda)
+    /manuale 3 off      // torna automatico
+
+All'ora dello slot ricevi **le slide come file** — non come foto: sono già
+normalizzate a 1440px e la ricompressione di Telegram le rovinerebbe — in
+ordine, e **la caption in un messaggio separato**, senza altro testo attorno,
+così un tocco lungo la copia per intero.
+
+Il post esce dalla coda e finisce in `consegnati-posts/`, con `handoff_at` nel
+`meta.json` e senza `published_at`: non risulta pubblicato e non viene ripreso
+dal catch-up.
+
+In `/coda` i post manuali sono marcati con 📲.
+
+**Limiti API da tenere presenti** (documentati Meta): 100 post pubblicati via
+API per account ogni 24 ore (un carosello conta 1); un container va pubblicato
+entro 24 ore o scade.
+
 ## Note
 
 - La repo deve restare **pubblica**: Instagram scarica le immagini da `raw.githubusercontent.com`

@@ -131,4 +131,42 @@ async function sendDocumentFile(filePath, caption) {
   }
 }
 
-module.exports = { sendMessage, sendPhotoFile, sendDocumentFile, answerCallback, editMessage };
+
+/**
+ * Manda piu' file in un unico album. Li invia come DOCUMENTI, non come foto:
+ * Telegram ricomprime le foto, e queste sono gia' normalizzate a 1440px per la
+ * pubblicazione — un giro di ricompressione in piu' vanificherebbe il lavoro.
+ * Max 10 elementi (che e' anche il limite di slide di un carosello).
+ * Ritorna true se l'invio e' riuscito.
+ */
+async function sendMediaGroup(filePaths, primaCaption) {
+  if (!configured()) {
+    console.log('[telegram] secrets mancanti, salto album:', filePaths.length, 'file');
+    return false;
+  }
+  try {
+    const form = new FormData();
+    form.append('chat_id', CHAT_ID);
+    const media = filePaths.slice(0, 10).map((f, i) => ({
+      type: 'document',
+      media: `attach://f${i}`,
+      ...(i === 0 && primaCaption ? { caption: primaCaption.slice(0, 1000) } : {}),
+    }));
+    form.append('media', JSON.stringify(media));
+    filePaths.slice(0, 10).forEach((f, i) => {
+      form.append(`f${i}`, new Blob([fs.readFileSync(f)]), path.basename(f));
+    });
+    const res = await fetch(`${API_BASE}/sendMediaGroup`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error('[telegram] sendMediaGroup fallita:', JSON.stringify(data));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[telegram] sendMediaGroup errore:', err.message);
+    return false;
+  }
+}
+
+module.exports = { sendMessage, sendPhotoFile, sendDocumentFile, answerCallback, editMessage , sendMediaGroup };
