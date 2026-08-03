@@ -17,7 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { sendMessage, sendPhotoFile, answerCallback, editMessage } = require('./telegram');
+const { sendMessage, sendPhotoFile, sendDocumentFile, answerCallback, editMessage } = require('./telegram');
 const { parseIgLink, parseIgFlags, keyboardFor, fetchMediaInfo, applyChoice, downloadPhoto, CHOICES } = require('./igdl');
 const {
   POST_QUEUE_DIR,
@@ -39,6 +39,11 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const QUEUE_DIR = 'queue';
+// Bozze: materiale grezzo da riformulare in chiave velo.rar. Il repo e' PUBBLICO,
+// quindi qui dentro NON finisce mai chi ha scritto il post originale: ne' username,
+// ne' link, ne' menzioni, ne' hashtag. L'attribuzione resta solo nella chat privata.
+const REPOST_DIR = 'bozze';                       // temporanea: gli zip NON si committano
+const REPOST_INDEX = 'bozze/indice.jsonl';        // solo file_id + numeri: nulla di identificante
 const PUBLISHED_DIR = 'published';
 const OFFSET_FILE = '.telegram-offset';
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
@@ -301,6 +306,7 @@ async function handleCommand(text) {
       `🗜 .zip di sole immagini → coda storie\n` +
       `🔗 Link post IG pubblico → foto in coda storie a risoluzione massima\n` +
       `   Flag: -f senza la 1ª · -b senza l'ultima · -f -b entrambe · solo link = tutte\n` +
+      `   -repost → BOZZA: zip mandato qui in chat con foto + testo (studio, NON storie)\n` +
       `   (testo non riconosciuto accanto al link → ti chiedo io coi bottoni)\n` +
       `📮 .zip con meta.json + immagini → POST carosello programmato\n` +
       `   meta.json: {"caption":"…","alt_text":["…"],"tags":["…"],"publish_at":"2026-07-20T17:30:00Z"}\n` +
@@ -337,7 +343,7 @@ Cosa salvo nella coda storie?`,
  * `feedback(testo)` (editMessage per i bottoni, sendMessage per i flag).
  * Ritorna sempre 0: il feedback è già completo, niente doppio messaggio.
  */
-async function runIgImport(code, choice, feedback) {
+async function runIgImport(code, choice, feedback, repost = false) {
   const fail = (why) =>
     feedback(`❌ Repost ${code} fallito: ${why}
 🔁 Rimanda il link per riprovare.`);
@@ -349,7 +355,7 @@ async function runIgImport(code, choice, feedback) {
 
   let info;
   try {
-    info = fetchMediaInfo(code);
+    info = fetchMediaInfo(code, repost);   // la bio costa una chiamata: solo per l'archivio
   } catch (err) {
     await fail(`igdl-fetch non risponde (${String(err.message || err).slice(0, 120)})`);
     return 0;
@@ -364,6 +370,9 @@ async function runIgImport(code, choice, feedback) {
     );
     return 0;
   }
+
+  // -repost -> zip d'archivio in repost-material/; altrimenti foto sciolte in coda storie.
+  if (repost) return archiveRepost(code, choice, info, photos, videosSkipped, feedback, fail);
 
   const saved = [];
   try {
@@ -390,6 +399,85 @@ async function runIgImport(code, choice, feedback) {
   return 0;
 }
 
+/**
+ * Scheda che accompagna le foto dentro la bozza. Il file NON entra nel repo
+ * (bozze/*.zip e' in .gitignore): viaggia solo verso la chat privata, quindi
+ * puo' contenere tutto quello che serve per riformulare il post, autore incluso.
+ *
+ * Nota storica: una prima versione anonimizzava il testo per poterlo committare.
+ * Non regge: nessuna regex riconosce che una frase in italiano identifica
+ * qualcuno, e bio e caption verbatim sono ricercabili parola per parola.
+ * Meglio tenere il file fuori dal repo e completo.
+ */
+function buildInfoText(info, choice, nFoto, videosSkipped) {
+  const righe = [
+    'BOZZA - materiale grezzo da riformulare in chiave velo.rar',
+    `Origine: @${info.author} - https://www.instagram.com/p/${info.code}/`,
+    `Salvato: ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+    `Foto: ${nFoto} (${CHOICES[choice].desc})${videosSkipped ? ` - video ignorati: ${videosSkipped}` : ''}`,
+  ];
+  if (info.taken_at) righe.push(`Pubblicato: ${String(info.taken_at).slice(0, 16)}`);
+  if (info.like_count != null) {
+    righe.push(`Like: ${info.like_count} - Commenti: ${info.comment_count == null ? '?' : info.comment_count}`);
+  }
+  if (info.bio) righe.push('', '--- BIO ACCOUNT ---', info.bio);
+  else if (info.bio_error) righe.push('', `(bio non recuperata: ${info.bio_error})`);
+  righe.push('', '--- TESTO ORIGINALE ---', info.caption || '(nessun testo)');
+  return righe.join('\n');
+}
+
+/**
+ * Bozza: scarica le foto in una temp, ci mette caption.txt, zippa e MANDA lo
+ * zip in chat come documento. Lo zip non resta nel repo; nell'indice finiscono
+ * solo il file_id di Telegram e due numeri, cosi' `ig-analisi/fetch-bozze.py`
+ * puo' scaricarle in locale senza consumare la coda degli update (che ha un
+ * solo consumatore: questo bot).
+ */
+async function archiveRepost(code, choice, info, photos, videosSkipped, feedback, fail) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `igrep-${code}-`));
+  const zipPath = path.join(tmpDir, `bozza-${new Date().toISOString().slice(0, 10)}-${code}.zip`);
+  try {
+    const foto = path.join(tmpDir, 'foto');
+    fs.mkdirSync(foto);
+    for (const p of photos) {
+      await downloadPhoto(p.url, path.join(foto, `${String(p.pos).padStart(2, '0')}.jpg`));
+    }
+    fs.writeFileSync(path.join(foto, 'caption.txt'),
+      buildInfoText(info, choice, photos.length, videosSkipped));
+    // -j: niente struttura di cartelle dentro lo zip, -q: silenzioso
+    execSync(`zip -j -q "${zipPath}" "${foto}"/*`);
+
+    const kb = Math.round(fs.statSync(zipPath).size / 1024);
+    const fileId = await sendDocumentFile(zipPath,
+      `Bozza da @${info.author} - ${photos.length} foto` +
+      `${videosSkipped ? ` (${videosSkipped} video ignorati)` : ''}`);
+
+    if (fileId) {
+      // Indice non identificante: nessun autore, nessuno shortcode. Il file_id
+      // e' opaco e senza il token del bot non apre niente.
+      if (!fs.existsSync(REPOST_DIR)) fs.mkdirSync(REPOST_DIR, { recursive: true });
+      fs.appendFileSync(REPOST_INDEX, JSON.stringify({
+        ts: new Date().toISOString(), file_id: fileId, foto: photos.length, kb,
+      }) + '\n');
+    }
+
+    await feedback(
+      `\u{1F4E6} Bozza pronta: ${photos.length} foto + testo` +
+      `${info.bio ? ' + bio' : ''} (${CHOICES[choice].desc}` +
+      `${videosSkipped ? `; ${videosSkipped} video ignorati` : ''}).\n` +
+      `\u{1F4CE} Te l'ho mandata qui sopra come file - ${kb} KB.\n` +
+      (fileId
+        ? `\u{1F4BE} In locale: python fetch-bozze.py (la scarica in ig-analisi/bozze/)`
+        : `\u26A0\uFE0F Non sono riuscito a registrarla nell'indice: salvala a mano dalla chat.`));
+    console.log(`Bozza inviata: ${photos.length} foto, ${kb} KB.`);
+  } catch (err) {
+    await fail(`bozza non creata: ${String(err.message || err).slice(0, 140)}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+  return 0;
+}
+
 /** Gestisce il tocco su un bottone (fallback quando il link arriva senza flag validi). */
 async function handleIgCallback(cb) {
   const chatId = cb.message && cb.message.chat && cb.message.chat.id;
@@ -407,7 +495,7 @@ async function handleIgCallback(cb) {
   // il feedback vero è l'edit del messaggio-domanda.
   await answerCallback(cb.id, '⏳ Scarico…');
 
-  return runIgImport(code, choice, (text) => editMessage(msgId, text));
+  return runIgImport(code, choice, (text) => editMessage(msgId, text), false);
 }
 
 /** Processa un singolo update. Ritorna quante immagini ha aggiunto in coda. */
@@ -426,8 +514,8 @@ async function processUpdate(update) {
   if (message.text) {
     const igCode = parseIgLink(message.text);
     if (igCode) {
-      const choice = parseIgFlags(message.text);
-      if (choice) return runIgImport(igCode, choice, (text) => sendMessage(text));
+      const flags = parseIgFlags(message.text);
+      if (flags) return runIgImport(igCode, flags.choice, (text) => sendMessage(text), flags.repost);
       await askIgChoice(igCode);   // token non riconosciuti → chiedo coi bottoni
       return 0;
     }
@@ -483,7 +571,8 @@ function commitAndPush() {
   execSync('git config user.name "ig-publisher-bot"');
   execSync('git config user.email "actions@github.com"');
   // -A anche su queue-posts: /sposta e /annulla producono rinomini e rimozioni
-  execSync(`git add -A -- ${QUEUE_DIR} ${POST_QUEUE_DIR} ${OFFSET_FILE}`);
+  // bozze/: si committa solo indice.jsonl, gli zip li esclude .gitignore
+  execSync(`git add -A -- ${QUEUE_DIR} ${POST_QUEUE_DIR} ${REPOST_DIR} ${OFFSET_FILE}`);
   execSync('git commit -m "Import da Telegram" || echo "Nulla da committare"');
   execSync('git pull --rebase');
   execSync('git push');
@@ -492,6 +581,7 @@ function commitAndPush() {
 async function main() {
   if (!fs.existsSync(QUEUE_DIR)) fs.mkdirSync(QUEUE_DIR, { recursive: true });
   if (!fs.existsSync(POST_QUEUE_DIR)) fs.mkdirSync(POST_QUEUE_DIR, { recursive: true });
+  if (!fs.existsSync(REPOST_DIR)) fs.mkdirSync(REPOST_DIR, { recursive: true });
 
   const lastOffset = getLastOffset();
   const updates = await getUpdates(lastOffset);

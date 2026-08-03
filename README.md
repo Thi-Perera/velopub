@@ -87,17 +87,53 @@ Limite Telegram: i bot scaricano file fino a ~20 MB.
 
 Manda al bot il **link di un post Instagram pubblico**, da solo o con i flag:
 
-    <link>            → salva TUTTE le foto
-    <link> -f         → tutte tranne la PRIMA
-    <link> -b         → tutte tranne l'ULTIMA
-    <link> -f -b      → senza prima e ultima (anche -fb)
+    <link>              → TUTTE le foto in coda storie
+    <link> -f           → tutte tranne la PRIMA
+    <link> -b           → tutte tranne l'ULTIMA
+    <link> -f -b        → senza prima e ultima (anche -fb)
+    <link> -repost      → BOZZA: zip in bozze/, NON entra nelle storie
 
 Con un flag riconosciuto il bot procede alla run successiva senza domande.
 Con testo che non riconosce non fa nulla e chiede coi bottoni — *Tutte ·
-Tranne la 1ª · Tranne l'ultima · Senza 1ª e ultima*. In entrambi i casi le
-foto vengono scaricate **a risoluzione massima** nella coda storie (`queue/`)
-e l'esito arriva in chat: `✅ N foto in coda (…)` oppure `❌` con il motivo.
-I video nel post vengono ignorati.
+Tranne la 1ª · Tranne l'ultima · Senza 1ª e ultima*. Le foto vengono
+scaricate **a risoluzione massima**; i video nel post vengono ignorati.
+L'esito arriva in chat: `✅ N foto in coda (…)` oppure `❌` con il motivo.
+
+**Un link per messaggio.** Se ne metti due nello stesso messaggio il bot
+prende solo il primo. Più messaggi vengono processati tutti nella stessa run;
+regolati sui 5-6 link per giro, così le chiamate a Instagram restano diluite.
+
+### Bozze (`-repost`)
+
+`-repost` non riempie le storie: prepara uno **zip** con le foto e un
+`caption.txt` (testo del post, bio dell'account, data, like) e **te lo manda
+in chat come file**. Serve come materiale grezzo da riformulare in chiave
+velo.rar. Si combina con gli altri flag (`-repost -f`, `-repost -fb`…).
+
+**Lo zip non entra nel repo**, ed è una scelta, non una dimenticanza: qui
+dentro è tutto pubblico, e un archivio con testo e biografia di post altrui
+riportati parola per parola non ci va. Una prima versione li anonimizzava per
+poterli committare: non regge, perché nessuna regex riconosce che una frase in
+italiano corrente identifica qualcuno — bio e caption sono ricercabili così
+come sono. Meglio tenere il file fuori dal repo e completo.
+
+Nel repo resta solo `bozze/indice.jsonl`: per ogni bozza il `file_id` di
+Telegram, la data e due numeri. Niente autore, niente link, niente testo — e
+il `file_id` senza il token del bot non apre nulla.
+
+La bio costa **una chiamata Instagram in più**, per questo la fa solo
+`-repost` e mai il flusso storie.
+
+**Per averle in locale**, dal PC:
+
+    cd C:\thi-workspace\ig-analisi
+    python fetch-bozze.py            # scarica le nuove in ig-analisi/bozze/
+    python fetch-bozze.py --estrai   # e le scompatta
+
+Lo script legge l'indice dal repo e scarica gli zip con `getFile`, che **non
+consuma la coda dei messaggi**: quella ha un solo consumatore, il bot in CI, e
+se gliela rubassimo si perderebbe i tuoi messaggi. Serve `TELEGRAM_BOT_TOKEN`
+in `ig-analisi/.env` o nell'ambiente.
 
 Nota bene i tempi: il bot gira **ogni ora al minuto :17** — la domanda arriva
 alla prima run dopo il link, il download alla prima run dopo il tocco. Per

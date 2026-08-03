@@ -56,14 +56,18 @@ eq(posDi(applyChoice(mk(3, [1, 2, 3]), 'a')), [], 'post di soli video → nessun
 
 console.log('parseIgFlags');
 const L = 'https://www.instagram.com/p/DWsLwXujDj-/';
-eq(parseIgFlags(L), 'a', 'solo link → tutte');
-eq(parseIgFlags(`${L} -f`), 'sf', 'link -f → senza la prima');
-eq(parseIgFlags(`-b ${L}`), 'sl', "-b prima del link → senza l'ultima");
-eq(parseIgFlags(`${L} -f -b`), 'sb', 'link -f -b → senza entrambe');
-eq(parseIgFlags(`${L} -b -f`), 'sb', 'ordine inverso → senza entrambe');
-eq(parseIgFlags(`${L} -fb`), 'sb', '-fb combinato → senza entrambe');
-eq(parseIgFlags(`${L} -bf`), 'sb', '-bf combinato → senza entrambe');
-eq(parseIgFlags(`${L} -f -f`), 'sf', 'flag ripetuto → ok');
+eq(parseIgFlags(L), { choice: 'a', repost: false }, 'solo link → tutte, coda storie');
+eq(parseIgFlags(`${L} -f`), { choice: 'sf', repost: false }, 'link -f → senza la prima');
+eq(parseIgFlags(`-b ${L}`), { choice: 'sl', repost: false }, "-b prima del link → senza l'ultima");
+eq(parseIgFlags(`${L} -f -b`), { choice: 'sb', repost: false }, 'link -f -b → senza entrambe');
+eq(parseIgFlags(`${L} -b -f`), { choice: 'sb', repost: false }, 'ordine inverso → senza entrambe');
+eq(parseIgFlags(`${L} -fb`), { choice: 'sb', repost: false }, '-fb combinato → senza entrambe');
+eq(parseIgFlags(`${L} -bf`), { choice: 'sb', repost: false }, '-bf combinato → senza entrambe');
+eq(parseIgFlags(`${L} -f -f`), { choice: 'sf', repost: false }, 'flag ripetuto → ok');
+eq(parseIgFlags(`${L} -repost`), { choice: 'a', repost: true }, '-repost → bozza, tutte le foto');
+eq(parseIgFlags(`${L} -repost -f`), { choice: 'sf', repost: true }, '-repost -f → bozza senza la prima');
+eq(parseIgFlags(`${L} -fb -repost`), { choice: 'sb', repost: true }, '-repost -fb → bozza senza prima e ultima');
+eq(parseIgFlags(`${L} -repost -repost`), { choice: 'a', repost: true }, '-repost ripetuto → ok');
 eq(parseIgFlags(`${L} ciao`), null, 'parola sconosciuta → null (chiedi)');
 eq(parseIgFlags(`${L} -x`), null, 'flag sconosciuto → null (chiedi)');
 eq(parseIgFlags(`${L} -f ciao`), null, 'flag valido + parola → null (chiedi)');

@@ -51,30 +51,40 @@ function keyboardFor(code) {
  * (supply-chain: pip esegue codice di build di terze parti); qui nessun
  * pip install, mai.
  */
-function fetchMediaInfo(code) {
+function fetchMediaInfo(code, wantBio = false) {
+  const args = ['igdl-fetch.py', code];
+  if (wantBio) args.push('--bio');   // costa una chiamata IG in più: solo per le bozze
   return JSON.parse(
-    execFileSync(PYTHON, ['igdl-fetch.py', code], { encoding: 'utf8', timeout: 120000 })
+    execFileSync(PYTHON, args, { encoding: 'utf8', timeout: 120000 })
       .trim().split('\n').pop()
   );
 }
 
 /**
- * Flag inline accanto al link: -f toglie la prima, -b l'ultima, insieme
- * (anche -fb/-bf) entrambe; solo link = tutte. Qualunque altro token →
- * null: il bot chiede coi bottoni invece di tirare a indovinare.
+ * Flag inline accanto al link.
+ *   -f        toglie la prima foto
+ *   -b        toglie l'ultima
+ *   -f -b     (anche -fb / -bf) entrambe
+ *   -repost   destinazione ARCHIVIO: zip in repost-material/ con caption+bio,
+ *             invece delle foto sciolte nella coda storie
+ * Solo link = tutte le foto in coda storie. Qualunque altro token → null:
+ * il bot chiede coi bottoni invece di tirare a indovinare.
+ * Ritorna { choice, repost } oppure null.
  */
 function parseIgFlags(text) {
   const toks = String(text || '').trim().split(/\s+/).filter(Boolean)
     .filter((t) => !/instagram\.com\//.test(t));
   let f = false;
   let b = false;
+  let repost = false;
   for (const t of toks) {
     if (t === '-f') f = true;
     else if (t === '-b') b = true;
     else if (t === '-fb' || t === '-bf') { f = true; b = true; }
+    else if (t === '-repost') repost = true;
     else return null;
   }
-  return f && b ? 'sb' : f ? 'sf' : b ? 'sl' : 'a';
+  return { choice: f && b ? 'sb' : f ? 'sf' : b ? 'sl' : 'a', repost };
 }
 
 /**

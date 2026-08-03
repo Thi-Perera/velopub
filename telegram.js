@@ -102,4 +102,33 @@ async function sendPhotoFile(filePath, caption) {
   }
 }
 
-module.exports = { sendMessage, sendPhotoFile, answerCallback, editMessage };
+
+/**
+ * Manda un file dal disco come documento. Ritorna il file_id assegnato da
+ * Telegram: serve allo script locale per riscaricarlo senza toccare la coda
+ * degli update (che ha un solo consumatore, il bot in CI).
+ */
+async function sendDocumentFile(filePath, caption) {
+  if (!configured()) {
+    console.log('[telegram] secrets mancanti, salto invio documento:', filePath);
+    return null;
+  }
+  try {
+    const form = new FormData();
+    form.append('chat_id', CHAT_ID);
+    if (caption) form.append('caption', caption.slice(0, 1000));
+    form.append('document', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
+    const res = await fetch(`${API_BASE}/sendDocument`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error('[telegram] sendDocument fallita:', JSON.stringify(data));
+      return null;
+    }
+    return (data.result && data.result.document && data.result.document.file_id) || null;
+  } catch (err) {
+    console.error('[telegram] sendDocument errore:', err.message);
+    return null;
+  }
+}
+
+module.exports = { sendMessage, sendPhotoFile, sendDocumentFile, answerCallback, editMessage };

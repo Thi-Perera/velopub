@@ -1,9 +1,13 @@
 """
 igdl-fetch.py — risolve un post Instagram pubblico in JSON con le immagini a
 risoluzione massima. Usato dal bot Telegram (import-from-telegram.js) per il
-repost nella coda storie.
+repost nella coda storie e per l'archivio -repost.
 
-    python3 igdl-fetch.py <shortcode>
+    python3 igdl-fetch.py <shortcode> [--bio]
+
+Con --bio aggiunge la biografia dell'account: costa UNA chiamata Instagram in
+piu', quindi la usa solo il flusso -repost (archivio di studio), mai quello
+delle storie.
 
 Stampa SEMPRE una riga JSON su stdout ed esce 0: gli errori stanno nel campo
 "error", mai come traceback (il chiamante fa il parse e riferisce in chat).
@@ -13,21 +17,31 @@ GitHub) oppure IG_SESSION_FILE (path locale, per i test). Il contenuto della
 sessione non viene MAI loggato.
 """
 import base64
+import io
 import json
 import os
 import sys
 import tempfile
 
+# Console Windows in cp1252: una caption con "→" farebbe UnicodeEncodeError.
+# ensure_ascii=True basterebbe, ma forzare UTF-8 rende leggibile anche il log.
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 
 def out(obj):
-    print(json.dumps(obj, ensure_ascii=False))
+    # ensure_ascii=True: l'output attraversa una pipe verso Node, deve
+    # sopravvivere a qualunque codepage. JSON.parse decodifica \\uXXXX.
+    print(json.dumps(obj, ensure_ascii=True))
     sys.exit(0)
 
 
 def main():
-    if len(sys.argv) < 2:
-        out({"ok": False, "error": "uso: igdl-fetch.py <shortcode>"})
-    code = sys.argv[1]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    want_bio = "--bio" in sys.argv[1:]
+    if not args:
+        out({"ok": False, "error": "uso: igdl-fetch.py <shortcode> [--bio]"})
+    code = args[0]
 
     # Sulle macchine locali con proxy TLS serve il cert store di sistema;
     # sui runner CI truststore non è installato e non serve: silenzio.
@@ -78,10 +92,33 @@ def main():
                 "url": str(m.get("thumbnail_url") or ""),
             })
 
+        user = m.get("user") or {}
+        author = user.get("username") or "?"
+
+        # La bio NON arriva con media_info: serve una chiamata in piu'.
+        # Se fallisce non e' fatale: l'archivio vale comunque.
+        bio = None
+        bio_error = None
+        if want_bio and user.get("pk"):
+            try:
+                bio = (cl.user_info_v1(str(user["pk"])).model_dump()
+                       .get("biography") or "").strip() or None
+            except Exception as e:  # noqa: BLE001
+                # Non fatale (la bozza vale comunque) ma NON silenzioso:
+                # un except muto qui aveva già nascosto un bug per un giro.
+                bio_error = f"{type(e).__name__}: {e}"[:120]
+
+        taken = m.get("taken_at")
         out({
             "ok": True,
-            "author": (m.get("user") or {}).get("username") or "?",
+            "author": author,
             "code": code,
+            "caption": (m.get("caption_text") or "").strip(),
+            "bio": bio,
+            "bio_error": bio_error,
+            "taken_at": str(taken) if taken else None,
+            "like_count": m.get("like_count"),
+            "comment_count": m.get("comment_count"),
             "slides": slides,
         })
     except Exception as e:  # noqa: BLE001 — tutto diventa JSON, mai traceback
