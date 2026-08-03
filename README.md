@@ -83,6 +83,35 @@ Limite Telegram: i bot scaricano file fino a ~20 MB.
 
 ⚠️ Mai committare o incollare questi valori. Se un token viene esposto: revocare e rigenerare subito.
 
+## 🔗 Repost da Instagram (storie)
+
+Manda al bot il **link di un post Instagram pubblico**, da solo o con i flag:
+
+    <link>            → salva TUTTE le foto
+    <link> -f         → tutte tranne la PRIMA
+    <link> -b         → tutte tranne l'ULTIMA
+    <link> -f -b      → senza prima e ultima (anche -fb)
+
+Con un flag riconosciuto il bot procede alla run successiva senza domande.
+Con testo che non riconosce non fa nulla e chiede coi bottoni — *Tutte ·
+Tranne la 1ª · Tranne l'ultima · Senza 1ª e ultima*. In entrambi i casi le
+foto vengono scaricate **a risoluzione massima** nella coda storie (`queue/`)
+e l'esito arriva in chat: `✅ N foto in coda (…)` oppure `❌` con il motivo.
+I video nel post vengono ignorati.
+
+Nota bene i tempi: il bot gira **ogni ora al minuto :17** — la domanda arriva
+alla prima run dopo il link, il download alla prima run dopo il tocco. Per
+l'esecuzione immediata: Actions → *Importa foto da Telegram* → Run workflow.
+
+Richiede il secret **`IG_SESSION_B64`**: base64 del file di sessione instagrapi
+di un account che può vedere il post (consigliato un account secondario, NON il
+principale). Da locale:
+
+    base64 -w0 percorso/sessione.json | gh secret set IG_SESSION_B64 -R <owner>/velopub
+
+⚠️ La chiamata a Instagram parte dai runner GitHub (IP datacenter): usa la
+sessione di un account che puoi permetterti di dover rigenerare.
+
 ## Note
 
 - La repo deve restare **pubblica**: Instagram scarica le immagini da `raw.githubusercontent.com`

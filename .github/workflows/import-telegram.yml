@@ -30,8 +30,16 @@ jobs:
       - name: Assicura ImageMagick
         run: command -v convert >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick)
 
+      # instagrapi per il repost IG: step SENZA secret in env (pip esegue
+      # codice di build di terze parti) e versione PINNATA = quella collaudata
+      # in locale. Se lo step fallisce, il bot risponde con un ❌ chiaro.
+      - name: Installa instagrapi (repost IG)
+        run: python3 -m pip install -q 'instagrapi==2.18.9'
+
       - name: Importa foto nuove da Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Repost IG → storie: base64 della sessione instagrapi (vedi README)
+          IG_SESSION_B64: ${{ secrets.IG_SESSION_B64 }}
         run: node import-from-telegram.js

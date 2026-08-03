@@ -17,7 +17,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { sendMessage, sendPhotoFile } = require('./telegram');
+const { sendMessage, sendPhotoFile, answerCallback, editMessage } = require('./telegram');
+const { parseIgLink, parseIgFlags, keyboardFor, fetchMediaInfo, applyChoice, downloadPhoto, CHOICES } = require('./igdl');
 const {
   POST_QUEUE_DIR,
   listQueuedPosts,
@@ -298,6 +299,9 @@ async function handleCommand(text) {
       `🤖 Bot velo.rar — cosa posso fare:\n` +
       `📷 Foto o immagini-FILE → coda storie\n` +
       `🗜 .zip di sole immagini → coda storie\n` +
+      `🔗 Link post IG pubblico → foto in coda storie a risoluzione massima\n` +
+      `   Flag: -f senza la 1ª · -b senza l'ultima · -f -b entrambe · solo link = tutte\n` +
+      `   (testo non riconosciuto accanto al link → ti chiedo io coi bottoni)\n` +
       `📮 .zip con meta.json + immagini → POST carosello programmato\n` +
       `   meta.json: {"caption":"…","alt_text":["…"],"tags":["…"],"publish_at":"2026-07-20T17:30:00Z"}\n` +
       `   (publish_at opzionale: senza, prendo il primo slot libero lun/mer/sab 17:30 UTC)\n` +
@@ -312,8 +316,104 @@ async function handleCommand(text) {
   return false;
 }
 
+/* ---------------------------------------------------------------------------
+ * Repost da Instagram → coda storie (vedi igdl.js per il flusso completo).
+ * ------------------------------------------------------------------------- */
+
+/** Messaggi-domanda già lavorati in QUESTA run (doppi tocchi nello stesso batch). */
+const igHandled = new Set();
+
+async function askIgChoice(code) {
+  await sendMessage(
+    `🔗 Post Instagram rilevato (${code}).
+Cosa salvo nella coda storie?`,
+    { reply_markup: keyboardFor(code) }
+  );
+  console.log(`Repost IG ${code}: domanda inviata.`);
+}
+
+/**
+ * Cuore del repost: risolve, filtra, scarica in queue/, manda l'esito via
+ * `feedback(testo)` (editMessage per i bottoni, sendMessage per i flag).
+ * Ritorna sempre 0: il feedback è già completo, niente doppio messaggio.
+ */
+async function runIgImport(code, choice, feedback) {
+  const fail = (why) =>
+    feedback(`❌ Repost ${code} fallito: ${why}
+🔁 Rimanda il link per riprovare.`);
+
+  if (!process.env.IG_SESSION_B64) {
+    await fail('manca il secret IG_SESSION_B64 (vedi README, sezione Repost).');
+    return 0;
+  }
+
+  let info;
+  try {
+    info = fetchMediaInfo(code);
+  } catch (err) {
+    await fail(`igdl-fetch non risponde (${String(err.message || err).slice(0, 120)})`);
+    return 0;
+  }
+  if (!info.ok) { await fail(info.error); return 0; }
+
+  const { photos, videosSkipped } = applyChoice(info.slides, choice);
+  if (photos.length === 0) {
+    await fail(
+      `con la scelta "${CHOICES[choice].desc}" non resta nessuna foto ` +
+      `(il post ha ${info.slides.length} slide${videosSkipped ? `, di cui ${videosSkipped} video` : ''}).`
+    );
+    return 0;
+  }
+
+  const saved = [];
+  try {
+    for (const p of photos) {
+      const dest = queueDest(`ig-${code}-${p.pos}.jpg`);
+      await downloadPhoto(p.url, dest);
+      saved.push(dest);
+    }
+  } catch (err) {
+    // Cleanup: senza, i file già scaricati verrebbero committati in coda
+    // nonostante il "fallito" — e al retry ci finirebbero DUE volte.
+    for (const f of saved) fs.rmSync(f, { force: true });
+    await fail(`scaricate ${saved.length}/${photos.length} foto, poi: ${String(err.message || err).slice(0, 120)}. Nessun file in coda.`);
+    return 0;
+  }
+
+  const inQueue = countImages(QUEUE_DIR);
+  await feedback(
+    `✅ Repost da @${info.author}: ${saved.length} foto in coda storie (${CHOICES[choice].desc}` +
+    `${videosSkipped ? `; ${videosSkipped} video ignorat${videosSkipped === 1 ? 'o' : 'i'}` : ''}).
+` +
+    `🗂 Storie in coda: ${inQueue} (autonomia ~${Math.floor(inQueue / 6)}g ${(inQueue % 6) * 4}h)`);
+  console.log(`Repost IG ${code}: ${saved.length} foto in coda (scelta: ${choice}).`);
+  return 0;
+}
+
+/** Gestisce il tocco su un bottone (fallback quando il link arriva senza flag validi). */
+async function handleIgCallback(cb) {
+  const chatId = cb.message && cb.message.chat && cb.message.chat.id;
+  if (String(chatId) !== String(CHAT_ID)) { await answerCallback(cb.id); return 0; }
+
+  const m = /^ig:([A-Za-z0-9_-]{5,}):(a|sf|sl|sb)$/.exec(cb.data || '');
+  if (!m) { await answerCallback(cb.id); return 0; }
+  const [, code, choice] = m;
+  const msgId = cb.message.message_id;
+
+  if (igHandled.has(msgId)) { await answerCallback(cb.id, 'Già in lavorazione.'); return 0; }
+  igHandled.add(msgId);
+  // Nota: col polling orario il callback ha spesso più di qualche secondo:
+  // l'ack può rispondere "query too old" e il toast non arrivare. Non-fatale,
+  // il feedback vero è l'edit del messaggio-domanda.
+  await answerCallback(cb.id, '⏳ Scarico…');
+
+  return runIgImport(code, choice, (text) => editMessage(msgId, text));
+}
+
 /** Processa un singolo update. Ritorna quante immagini ha aggiunto in coda. */
 async function processUpdate(update) {
+  if (update.callback_query) return handleIgCallback(update.callback_query);
+
   const message = update.message;
   if (!message) return 0;
 
@@ -322,8 +422,15 @@ async function processUpdate(update) {
     return 0;
   }
 
-  // Comandi testuali
+  // Testo: link Instagram (con eventuali flag -f/-b) → repost; altrimenti comandi
   if (message.text) {
+    const igCode = parseIgLink(message.text);
+    if (igCode) {
+      const choice = parseIgFlags(message.text);
+      if (choice) return runIgImport(igCode, choice, (text) => sendMessage(text));
+      await askIgChoice(igCode);   // token non riconosciuti → chiedo coi bottoni
+      return 0;
+    }
     await handleCommand(message.text);
     return 0;
   }
