@@ -57,6 +57,8 @@ a chiunque prima dell'uscita**. Scelta accettata: niente segreti nelle caption.
 | `/anteprima N` | Prima slide + caption del post N |
 | `/sposta N <ISO\|prossimo>` | Cambia lo slot del post N |
 | `/annulla N` | Rimuove il post N dalla coda |
+| `/manuale N [off]` | Allo slot te lo consegna invece di pubblicarlo (per la musica) |
+| `/zip [N]` | Ti impacchetta il post **subito**: zip con `caption.txt` + slide numerate |
 | `/status` | Stato code, pubblicate, autonomia |
 | `/help` | Guida rapida |
 
@@ -183,6 +185,37 @@ In `/coda` i post manuali sono marcati con 📲.
 **Limiti API da tenere presenti** (documentati Meta): 100 post pubblicati via
 API per account ogni 24 ore (un carosello conta 1); un container va pubblicato
 entro 24 ore o scade.
+
+### 📦 `/zip` — il pacchetto quando lo chiedi tu
+
+`/manuale` aspetta lo slot. Se il post lo vuoi **adesso** — perché hai dieci
+minuti liberi e tanto vale caricarlo — c'è `/zip`:
+
+    /zip           // il primo post in coda
+    /zip 3         // il terzo di /coda
+    /zip persona   // per pezzo di nome
+
+Arriva un archivio che si chiama come lo slot, quindi **la data di uscita è nel
+nome**: `2026-08-08-1730-persona-3.zip`. Dentro:
+
+    caption.txt        la caption completa, tag inclusi
+    01-copertina.jpg   la copertina
+    02-pag1.jpg        le pagine, in ordine
+    03-pag2.jpg
+    …
+
+I nomi sono pensati perché **l'ordine alfabetico coincida con l'ordine del
+carosello**: su Instagram le selezioni tutte insieme e si mettono da sole al
+posto giusto. La caption arriva anche come messaggio separato in chat, così un
+tocco lungo la copia senza aprire il file.
+
+`/zip` **non tocca la coda**: il post resta programmato com'era, e puoi
+richiederlo quante volte vuoi. Il che significa che se era automatico lo
+pubblicherà comunque il bot allo slot — se vuoi caricarlo tu, marcalo prima con
+`/manuale N` (il messaggio di `/zip` te lo ricorda).
+
+Il tetto di Telegram per i documenti è 50 MB: sopra, il bot avvisa invece di
+provarci.
 
 ## Note
 

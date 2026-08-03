@@ -190,6 +190,70 @@ async function handlePostZip(tmpDir, zipName, metaFile) {
   return result.count;
 }
 
+// Telegram rifiuta i documenti oltre i 50 MB: meglio dirlo prima di provarci.
+const TG_MAX_DOC_MB = 50;
+
+/**
+ * Impacchetta un post della coda e lo manda in chat, SU RICHIESTA.
+ * Lo zip prende il nome dallo slot (cioe' la data di pubblicazione), dentro ci
+ * sono la caption pronta da incollare e le slide rinominate in ordine:
+ * copertina, poi le pagine. L'ordine alfabetico dei file E' l'ordine del
+ * carosello, cosi' su Instagram basta selezionarle tutte.
+ *
+ * Non tocca la coda: si puo' richiedere tutte le volte che serve, e il post
+ * resta programmato esattamente com'era.
+ */
+async function inviaZipPost(post) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pacco-'));
+  const dentro = path.join(tmpDir, 'dentro');
+  fs.mkdirSync(dentro);
+  const zipPath = path.join(tmpDir, `${post.dirName}.zip`);
+  try {
+    const caption = buildCaption(post.meta);
+    fs.writeFileSync(path.join(dentro, 'caption.txt'), caption, 'utf8');
+    post.images.forEach((f, i) => {
+      const ext = path.extname(f).toLowerCase();
+      const nome = i === 0
+        ? `01-copertina${ext}`
+        : `${String(i + 1).padStart(2, '0')}-pag${i}${ext}`;
+      fs.copyFileSync(path.join(post.dir, f), path.join(dentro, nome));
+    });
+    // -j: niente struttura di cartelle dentro lo zip, -q: silenzioso
+    execSync(`zip -j -q "${zipPath}" "${dentro}"/*`);
+
+    const bytes = fs.statSync(zipPath).size;
+    if (bytes > TG_MAX_DOC_MB * 1024 * 1024) {
+      await sendMessage(
+        `⚠️ Il pacchetto di "${post.dirName}" pesa ${Math.round(bytes / 1048576)} MB: ` +
+        `Telegram si ferma a ${TG_MAX_DOC_MB} MB. Usa /anteprima, oppure togli qualche slide.`);
+      return false;
+    }
+
+    const modo = post.meta.manuale === true
+      ? `📲 È già manuale: allo slot te lo rimando comunque, non lo pubblico io.`
+      : `🤖 Attenzione: è ancora AUTOMATICO — allo slot lo pubblico io. Per fermarlo: /manuale ${post.dirName}`;
+    const ok = await sendDocumentFile(zipPath,
+      `📦 ${post.dirName}.zip (${Math.round(bytes / 1024)} KB)\n` +
+      `🖼 ${post.images.length} slide + caption.txt · ⏰ slot ${formatWhen(post.meta.publish_at)}\n` +
+      `${modo}\n` +
+      `La caption è anche nel messaggio qui sotto, per copiarla al volo.`);
+    if (!ok) {
+      await sendMessage(`⚠️ Pacchetto di "${post.dirName}" non inviato: Telegram ha rifiutato il file. Riprova con /zip.`);
+      return false;
+    }
+    // Messaggio separato e pulito: un tocco lungo copia la caption per intero.
+    await sendMessage(caption);
+    console.log(`Pacchetto inviato: ${post.dirName}.zip`);
+    return true;
+  } catch (err) {
+    console.error(`Pacchetto di ${post.dirName} fallito:`, err.message);
+    await sendMessage(`⚠️ Non sono riuscito a impacchettare "${post.dirName}": ${err.message.slice(0, 200)}`);
+    return false;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 /** Estrae uno zip e lo smista: meta.json/caption.txt → coda POST, altrimenti coda STORIE. */
 async function handleZip(zipPath, zipName, updateId) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-zip-'));
@@ -306,6 +370,17 @@ async function handleCommand(text) {
     return true;
   }
 
+  if (lower.startsWith('/zip') || lower.startsWith('/pacco')) {
+    const posts = listQueuedPosts();
+    if (posts.length === 0) { await sendMessage('📮 Nessun post in coda da impacchettare.'); return true; }
+    const ref = cmd.split(/\s+/)[1];
+    // Senza numero prendo il primo della coda: nove volte su dieci e' quello.
+    const { post, error } = ref ? findPost(ref, posts) : { post: posts[0] };
+    if (error) { await sendMessage(`⚠️ ${error}`); return true; }
+    await inviaZipPost(post);
+    return true;
+  }
+
   if (lower.startsWith('/annulla')) {
     const ref = cmd.split(/\s+/)[1];
     if (!ref) { await sendMessage('Uso: /annulla <numero o nome> (vedi /coda)'); return true; }
@@ -332,6 +407,8 @@ async function handleCommand(text) {
       `📋 /coda → post programmati\n` +
       `👀 /anteprima N · 🔀 /sposta N <data|prossimo> · 🗑 /annulla N\n` +
       `📲 /manuale N → allo slot te lo mando invece di pubblicarlo (per la musica); /manuale N off per annullare\n` +
+      `📦 /zip [N] → te lo impacchetto SUBITO: zip con caption.txt + slide numerate, nome = data di uscita\n` +
+      `   (senza N prende il primo in coda; non tocca la coda, chiedilo quante volte vuoi)\n` +
       `📊 /status → stato code\n` +
       `Storie ogni 4 ore; post negli slot del calendario. Conferme sempre qui.`
     );
@@ -636,8 +713,14 @@ async function main() {
   }
 }
 
-main().catch(async (err) => {
-  console.error('Fallito:', err.message);
-  await sendMessage(`❌ Import da Telegram fallito: ${err.message}`);
-  process.exit(1);
-});
+// Parte solo se lanciato direttamente: cosi' il modulo si puo' importare nei
+// test senza far partire un giro vero di import.
+if (require.main === module) {
+  main().catch(async (err) => {
+    console.error('Fallito:', err.message);
+    await sendMessage(`❌ Import da Telegram fallito: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { __test: { inviaZipPost, findPost } };
