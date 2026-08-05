@@ -16,7 +16,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const { sendMessage, sendPhotoFile, sendDocumentFile, answerCallback, editMessage } = require('./telegram');
 const { parseIgLink, parseIgFlags, keyboardFor, fetchMediaInfo, applyChoice, downloadPhoto, CHOICES } = require('./igdl');
 const {
@@ -192,6 +192,88 @@ async function handlePostZip(tmpDir, zipName, metaFile) {
 
 // Telegram rifiuta i documenti oltre i 50 MB: meglio dirlo prima di provarci.
 const TG_MAX_DOC_MB = 50;
+// Sotto il tetto vero, perche' lo zip comprime poco le JPEG e il margine serve.
+const CHUNK_MB = 42;
+
+/** Le sorgenti che `/archivio` sa impacchettare. */
+const ARCHIVI = {
+  storie:    { dir: QUEUE_DIR,       desc: 'immagini in coda storie' },
+  pubblicate:{ dir: PUBLISHED_DIR,   desc: 'storie gia uscite' },
+  post:      { dir: POST_QUEUE_DIR,  desc: 'post carosello in coda' },
+};
+
+function elencaFile(dir) {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...elencaFile(p));
+    else if (!e.name.startsWith('.')) out.push(p);
+  }
+  return out;
+}
+
+/**
+ * Impacchetta una cartella e la manda in chat, spezzando in piu' zip quando
+ * serve: i bot Telegram non accettano documenti oltre i 50 MB, e `queue/` da
+ * sola supera quella soglia. La divisione e' per DIMENSIONE, non per numero di
+ * file, cosi' un pacchetto pesante non fa saltare la parte.
+ */
+async function mandaArchivio(chiave, feedback) {
+  const conf = ARCHIVI[chiave];
+  const files = elencaFile(conf.dir);
+  if (files.length === 0) {
+    await feedback(`\u{1F4ED} "${chiave}": non c'e' niente da mandare.`);
+    return true;
+  }
+
+  // Raggruppo per dimensione. Un singolo file oltre il limite va da solo:
+  // meglio un tentativo fallito e dichiarato che escluderlo in silenzio.
+  const limite = CHUNK_MB * 1024 * 1024;
+  const parti = [];
+  let corrente = [];
+  let peso = 0;
+  for (const f of files) {
+    const s = fs.statSync(f).size;
+    if (corrente.length && peso + s > limite) { parti.push(corrente); corrente = []; peso = 0; }
+    corrente.push(f);
+    peso += s;
+  }
+  if (corrente.length) parti.push(corrente);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-'));
+  const oggi = new Date().toISOString().slice(0, 10);
+  let inviate = 0;
+  try {
+    await feedback(`\u{1F4E6} "${chiave}": ${files.length} file, ${parti.length} pacchetto/i. Li mando...`);
+    for (let i = 0; i < parti.length; i++) {
+      const nome = parti.length === 1
+        ? `velopub-${chiave}-${oggi}.zip`
+        : `velopub-${chiave}-${oggi}-parte${i + 1}di${parti.length}.zip`;
+      const zipPath = path.join(tmpDir, nome);
+      const lista = path.join(tmpDir, `lista-${i}.txt`);
+      // -@ legge i path da stdin: una riga di comando con 160 file la supera.
+      fs.writeFileSync(lista, parti[i].join('\n'));
+      execSync(`zip -q -X "${zipPath}" -@ < "${lista}"`, { shell: '/bin/bash' });
+      const mb = (fs.statSync(zipPath).size / 1048576).toFixed(1);
+      if (fs.statSync(zipPath).size > TG_MAX_DOC_MB * 1048576) {
+        await feedback(`⚠️ Parte ${i + 1} pesa ${mb} MB, oltre il limite di Telegram: saltata.`);
+        continue;
+      }
+      const ok = await sendDocumentFile(zipPath,
+        `${nome} — ${parti[i].length} file, ${mb} MB`);
+      if (ok) inviate++;
+      else await feedback(`⚠️ Parte ${i + 1} rifiutata da Telegram.`);
+    }
+    await feedback(`✅ "${chiave}": ${inviate}/${parti.length} pacchetti inviati (${files.length} file).`);
+    return true;
+  } catch (err) {
+    await feedback(`❌ Archivio "${chiave}" fallito: ${String(err.message).slice(0, 160)}`);
+    return false;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
 
 /**
  * Impacchetta un post della coda e lo manda in chat, SU RICHIESTA.
@@ -370,6 +452,31 @@ async function handleCommand(text) {
     return true;
   }
 
+  if (lower.startsWith('/archivio')) {
+    const arg = (cmd.split(/\s+/)[1] || '').toLowerCase();
+    const chiavi = Object.keys(ARCHIVI);
+    if (!arg) {
+      const righe = chiavi.map((k) => {
+        const n = elencaFile(ARCHIVI[k].dir).length;
+        return `  /archivio ${k} — ${ARCHIVI[k].desc} (${n} file)`;
+      });
+      await sendMessage(
+        `\u{1F4E6} Ti mando qui una cartella intera, in zip. Se supera i 50 MB la spezzo.\n` +
+        `${righe.join('\n')}\n  /archivio tutto — tutte e tre, una dopo l'altra`);
+      return true;
+    }
+    if (arg === 'tutto') {
+      for (const k of chiavi) await mandaArchivio(k, sendMessage);
+      return true;
+    }
+    if (!ARCHIVI[arg]) {
+      await sendMessage(`⚠️ "${arg}" non esiste. Scegli fra: ${chiavi.join(', ')}, tutto.`);
+      return true;
+    }
+    await mandaArchivio(arg, sendMessage);
+    return true;
+  }
+
   if (lower.startsWith('/zip') || lower.startsWith('/pacco')) {
     const posts = listQueuedPosts();
     if (posts.length === 0) { await sendMessage('📮 Nessun post in coda da impacchettare.'); return true; }
@@ -409,6 +516,8 @@ async function handleCommand(text) {
       `📲 /manuale N → allo slot te lo mando invece di pubblicarlo (per la musica); /manuale N off per annullare\n` +
       `📦 /zip [N] → te lo impacchetto SUBITO: zip con caption.txt + slide numerate, nome = data di uscita\n` +
       `   (senza N prende il primo in coda; non tocca la coda, chiedilo quante volte vuoi)\n` +
+      `🗄 /archivio [storie|pubblicate|post|tutto] → ti mando qui la cartella intera in zip\n` +
+      `   (oltre i 50 MB la spezzo in parti numerate; senza argomento ti dico cosa c'è)\n` +
       `📊 /status → stato code\n` +
       `Storie ogni 4 ore; post negli slot del calendario. Conferme sempre qui.`
     );
@@ -515,10 +624,104 @@ function buildInfoText(info, choice, nFoto, videosSkipped) {
   if (info.like_count != null) {
     righe.push(`Like: ${info.like_count} - Commenti: ${info.comment_count == null ? '?' : info.comment_count}`);
   }
+  if (info.via) righe.push(`Risolto via: ${info.via}`);
   if (info.bio) righe.push('', '--- BIO ACCOUNT ---', info.bio);
   else if (info.bio_error) righe.push('', `(bio non recuperata: ${info.bio_error})`);
   righe.push('', '--- TESTO ORIGINALE ---', info.caption || '(nessun testo)');
   return righe.join('\n');
+}
+
+/** Misura tutte le immagini in una sola chiamata a Python (Pillow c'e' sempre). */
+function misura(files) {
+  const py = [
+    'import sys, json',
+    'from PIL import Image',
+    'out = []',
+    'for p in sys.argv[1:]:',
+    '    try:',
+    '        with Image.open(p) as im: out.append([im.width, im.height, im.format])',
+    '    except Exception as e: out.append([0, 0, "?"])',
+    'print(json.dumps(out))',
+  ].join('\n');
+  try {
+    return JSON.parse(execFileSync(process.env.IGDL_PYTHON || 'python3',
+      ['-c', py, ...files], { encoding: 'utf8', timeout: 60000 }).trim());
+  } catch (err) {
+    console.error('[bozza] misura immagini fallita:', err.message.slice(0, 90));
+    return files.map(() => [0, 0, '?']);
+  }
+}
+
+/**
+ * La mini-guida che viaggia dentro ogni bozza. Serve a rispondere, senza
+ * riaprire nulla, alle due domande che ci si fa davanti a uno zip di
+ * materiale: **cosa c'e' dentro** (e quanto vale, misurato) e **cosa ci si fa**.
+ * I numeri sono misurati sui file veri, non stimati.
+ */
+function buildGuidaText(info, files, choice, videosSkipped) {
+  const dim = misura(files);
+  const piena = [];
+  const dentro = [];
+  const scarto = [];
+  dim.forEach(([w, h], i) => {
+    const nome = path.basename(files[i]);
+    const riga = `${nome}  ${w}x${h}`;
+    if (w >= 1080 && h >= 1080) piena.push(riga);
+    else if (Math.min(w, h) >= 800) dentro.push(riga);
+    else scarto.push(riga);
+  });
+  const [w0, h0] = dim[0] || [0, 0];
+  const ratio = h0 ? (w0 / h0).toFixed(2) : '?';
+
+  const L = [];
+  L.push('MINI-GUIDA — cosa c\'e\' in questa bozza e cosa farci');
+  L.push('='.repeat(52));
+  L.push('');
+  L.push(`Origine: @${info.author} · ${files.length} immagini (${CHOICES[choice].desc})` +
+         `${videosSkipped ? ` · ${videosSkipped} video scartati` : ''}`);
+  L.push('');
+  L.push('--- QUALITA\' MISURATA ---');
+  L.push(`Copertina possibile (>=1080 su entrambi i lati): ${piena.length}`);
+  piena.forEach((r) => L.push(`   ${r}`));
+  if (dentro.length) {
+    L.push(`Solo come slide interne (lato corto >=800): ${dentro.length}`);
+    dentro.forEach((r) => L.push(`   ${r}`));
+  }
+  if (scarto.length) {
+    L.push(`Da scartare (lato corto <800): ${scarto.length}`);
+    scarto.forEach((r) => L.push(`   ${r}`));
+  }
+  L.push('');
+  L.push(`La prima immagine ha ratio ${ratio}. Conta: il carosello eredita il ratio`);
+  L.push('della PRIMA slide, quindi la copertina decide il taglio di tutte le altre.');
+  L.push('La copertina va a 4:5 (1080x1350).');
+  L.push('');
+  L.push('--- SE DIVENTA UN POST velo.rar ---');
+  L.push('Massimo 10 slide via API. Niente slide CTA "FOLLOW US".');
+  L.push('Niente testo critico nella fascia bassa: i crop 1:1 e 3:4 della griglia lo tagliano.');
+  L.push('');
+  L.push('Caption: ZERO hashtag su Instagram (misurato: 26,5 like con contro 22,6 senza,');
+  L.push('e 7 competitor su 8 da 29K a 3,1M follower non ne usano). Almeno 500 caratteri');
+  L.push('(42 like medi contro 23,1 sotto i 300).');
+  L.push('');
+  L.push('La VOCE si prende dalle 13 caption vere in ig-analisi/baseline-velo.json, mai');
+  L.push('da un prompt che la descrive. Elementi: riga di premessa "Titolo (Anno): premessa');
+  L.push('secca" · blocco a frammenti senza verbo · "X as Y" invece di "like" · mossa');
+  L.push('concessiva · eredita\' con eredi nominati · chiusura con attitudine · riga-firma.');
+  L.push('Densita\': 10-12 nomi propri e almeno un anno ogni ~1.200 caratteri.');
+  L.push('');
+  L.push('Titolo di COPERTINA (formula diversa dalla caption):');
+  L.push('   [Etichetta estetica] in [Opera]   es. "Fog and Psyche in Silent Hill 2"');
+  L.push('2-4 parole in Title Case che nominano un LOOK, mai un\'osservazione.');
+  L.push('');
+  L.push('--- ATTENZIONE ---');
+  L.push('Queste immagini vengono dal post di un altro account. Per le storie e\' prassi,');
+  L.push('per un post carosello no: decidi se accreditare la fonte.');
+  L.push('La musica non passa dall\'API: il post va marcato "manuale": true, oppure');
+  L.push('ritirato col comando /zip.');
+  L.push('');
+  L.push('Guida completa: ig-analisi/DOCS/GUIDA.md · specifica: DOCS/BIBBIA.md');
+  return L.join('\n');
 }
 
 /**
@@ -539,6 +742,11 @@ async function archiveRepost(code, choice, info, photos, videosSkipped, feedback
     }
     fs.writeFileSync(path.join(foto, 'caption.txt'),
       buildInfoText(info, choice, photos.length, videosSkipped));
+    // La guida si chiama 00- per stare in cima quando si apre lo zip.
+    const scaricate = photos.map((p) => path.join(foto, `${String(p.pos).padStart(2, '0')}.jpg`))
+      .filter((f) => fs.existsSync(f));
+    fs.writeFileSync(path.join(foto, '00-GUIDA.txt'),
+      buildGuidaText(info, scaricate, choice, videosSkipped));
     // -j: niente struttura di cartelle dentro lo zip, -q: silenzioso
     execSync(`zip -j -q "${zipPath}" "${foto}"/*`);
 
@@ -723,4 +931,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { __test: { inviaZipPost, findPost } };
+module.exports = { __test: { inviaZipPost, findPost, buildGuidaText, elencaFile, ARCHIVI } };

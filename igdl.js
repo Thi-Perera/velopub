@@ -2,10 +2,15 @@
  * igdl.js — repost da Instagram alla coda storie.
  *
  * Flusso: link IG in chat → il bot chiede con 4 bottoni cosa salvare →
- * al tocco (callback_query, run successiva) igdl-fetch.py risolve il post
- * via instagrapi (secret IG_SESSION_B64) → le foto si scaricano dal CDN a
- * risoluzione massima → queue/ (storie). Il feedback avviene modificando
- * il messaggio-domanda: ✅ con conteggio o ❌ con il motivo.
+ * al tocco (callback_query, run successiva) igdl-fetch.py risolve il post →
+ * le foto si scaricano dal CDN a risoluzione massima e si convertono in JPEG
+ * → queue/ (storie). Il feedback avviene modificando il messaggio-domanda:
+ * ✅ con conteggio o ❌ con il motivo.
+ *
+ * La risoluzione passa dalla via PUBBLICA (`media_info_gql`, nessuna
+ * autenticazione): la sessione instagrapi serve solo come riserva e per la
+ * bio. Prima era obbligatoria, e quando è scaduta la feature si è fermata
+ * del tutto — vedi l'intestazione di igdl-fetch.py.
  *
  * Nessuno stato su file: il callback_data porta shortcode e scelta
  * (max 64 byte, "ig:<code>:<scelta>" ci sta sempre).
@@ -102,13 +107,56 @@ function applyChoice(slides, choice) {
 }
 
 /** Scarica una foto dal CDN (nessuna autenticazione) e la salva su disco. */
+/**
+ * Il CDN di Instagram serve WEBP tanto quanto JPEG, e la via pubblica lo fa
+ * quasi sempre. Prima si scrivevano i byte cosi' com'erano dentro un file
+ * chiamato `.jpg`: nel repo ci sono finiti 9 file WEBP travestiti. L'API di
+ * Instagram vuole JPEG per le immagini, quindi qui si converte davvero invece
+ * di fidarsi dell'estensione.
+ *
+ * La conversione passa da Pillow, non da ImageMagick: Pillow arriva come
+ * dipendenza di instagrapi (quindi sul runner c'e' sempre) e gestisce il WEBP
+ * senza dipendere da un delegato esterno. In locale su Windows, per giunta,
+ * `convert` e' il convertitore FAT->NTFS di sistema e non ImageMagick.
+ *
+ * Se la conversione fallisce si tengono i byte originali: un'immagine nel
+ * formato sbagliato e' comunque meglio di nessuna immagine.
+ */
+const PY_TO_JPEG = [
+  'import sys',
+  'from PIL import Image',
+  'im = Image.open(sys.argv[1])',
+  'im = im if im.mode in ("RGB", "L") else im.convert("RGB")',
+  'im.save(sys.argv[2], "JPEG", quality=92, optimize=True)',
+].join('\n');
+
+function eJpeg(buf) {
+  return buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF;
+}
+
 async function downloadPhoto(url, dest) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`download CDN fallito (HTTP ${res.status})`);
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length < 1024) throw new Error('download CDN sospetto: file quasi vuoto');
-  fs.writeFileSync(dest, buf);
-  return buf.length;
+
+  if (eJpeg(buf)) {
+    fs.writeFileSync(dest, buf);
+    return buf.length;
+  }
+
+  const tmp = `${dest}.orig`;
+  fs.writeFileSync(tmp, buf);
+  try {
+    execFileSync(PYTHON, ['-c', PY_TO_JPEG, tmp, dest], { timeout: 60000 });
+    return fs.statSync(dest).size;
+  } catch (err) {
+    console.error(`[igdl] conversione in JPEG fallita (${String(err.message).slice(0, 90)}): tengo l'originale`);
+    fs.writeFileSync(dest, buf);
+    return buf.length;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 module.exports = { parseIgLink, parseIgFlags, keyboardFor, fetchMediaInfo, applyChoice, downloadPhoto, CHOICES, IG_URL_RE };
